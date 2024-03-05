@@ -3,6 +3,8 @@ import lpips
 from data import data_loader as dl
 import argparse
 from IPython import embed
+import wandb
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_mode', type=str, default='2afc', help='[2afc,jnd]')
@@ -20,6 +22,9 @@ parser.add_argument('--model_path', type=str, default=None, help='location of mo
 parser.add_argument('--from_scratch', action='store_true', help='model was initialized from scratch')
 parser.add_argument('--train_trunk', action='store_true', help='model trunk was trained/tuned')
 parser.add_argument('--version', type=str, default='0.1', help='v0.1 is latest, v0.0 was original release')
+parser.add_argument('--wandb', type=bool, default=False, help='Log validation to wandb as the last training run')
+
+# wandb.init(project="lpips", id="38fof0v2", resume="must")
 
 opt = parser.parse_args()
 if(opt.model in ['l2','ssim']):
@@ -39,14 +44,14 @@ elif(opt.model in ['l2','ssim']):
 
 # initialize data loader
 for dataset in opt.datasets:
-	data_loader = dl.CreateDataLoader(dataset,dataset_mode=opt.dataset_mode, batch_size=opt.batch_size, nThreads=opt.nThreads)
+	data_loader = dl.CreateDataLoader(dataset,dataset_mode=opt.dataset_mode, load_size=56, batch_size=opt.batch_size, nThreads=opt.nThreads)
 
 	# evaluate model on data
 	if(opt.dataset_mode=='2afc'):
 		(score, results_verbose) = lpips.score_2afc_dataset(data_loader, trainer.forward, name=dataset)
 	elif(opt.dataset_mode=='jnd'):
 		(score, results_verbose) = lpips.score_jnd_dataset(data_loader, trainer.forward, name=dataset)
-
+	# wandb.log({dataset: score})
 	# print results
 	print('  Dataset [%s]: %.2f'%(dataset,100.*score))
 

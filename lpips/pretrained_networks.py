@@ -1,6 +1,9 @@
 from collections import namedtuple
 import torch
 from torchvision import models as tv
+import torch.nn.functional as F
+from functools import reduce
+import math
 
 class squeezenet(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
@@ -96,7 +99,8 @@ class alexnet(torch.nn.Module):
 class vgg16(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
         super(vgg16, self).__init__()
-        vgg_pretrained_features = tv.vgg16(pretrained=pretrained).features
+        weights = tv.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
+        vgg_pretrained_features = tv.vgg16(weights=weights).features
         self.slice1 = torch.nn.Sequential()
         self.slice2 = torch.nn.Sequential()
         self.slice3 = torch.nn.Sequential()
@@ -133,21 +137,133 @@ class vgg16(torch.nn.Module):
 
         return out
 
+class dinov2(torch.nn.Module):
+    def __init__(self, requires_grad=False, pretrained=True, model='dinov2_vits14'):
+        super(dinov2, self).__init__()
+        dinov2_model = torch.hub.load('facebookresearch/dinov2', model)
 
+        # (patch_embed): PatchEmbed(
+        #     (proj): Conv2d(3, 384, kernel_size=(14, 14), stride=(14, 14))
+        #     (norm): Identity()
+        # )
+        # (blocks): ModuleList(
+        #     (0-11): 12 x NestedTensorBlock(
+        #     (norm1): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+        #     (attn): MemEffAttention(
+        #         (qkv): Linear(in_features=384, out_features=1152, bias=True)
+        #         (attn_drop): Dropout(p=0.0, inplace=False)
+        #         (proj): Linear(in_features=384, out_features=384, bias=True)
+        #         (proj_drop): Dropout(p=0.0, inplace=False)
+        #     )
+        #     (ls1): LayerScale()
+        #     (drop_path1): Identity()
+        #     (norm2): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+        #     (mlp): Mlp(
+        #         (fc1): Linear(in_features=384, out_features=1536, bias=True)
+        #         (act): GELU(approximate='none')
+        #         (fc2): Linear(in_features=1536, out_features=384, bias=True)
+        #         (drop): Dropout(p=0.0, inplace=False)
+        #     )
+        #     (ls2): LayerScale()
+        #     (drop_path2): Identity()
+        #     )
+        # )
+        # (norm): LayerNorm((384,), eps=1e-06, elementwise_affine=True)
+        # (head): Identity()
+
+        self.patch_embed = dinov2_model.patch_embed
+        self.blocks = dinov2_model.blocks
+        self.norm = dinov2_model.norm
+        self.head = dinov2_model.head
+
+        if not requires_grad:
+            for param in self.parameters():
+                param.requires_grad = False
+
+    def respatialize(self, x: torch.Tensor):
+        B, S, C = x.shape
+        x = x.permute(0,2,1)
+        x = x.reshape((B, C, int(math.sqrt(S)), -1))
+        return x
+
+    def forward(self, X):
+        h = self.patch_embed(X)
+        relus = []
+        for idx, block in enumerate(self.blocks):
+            # if idx > 0:
+            #     relus.append(self.respatialize(h))
+            h = block(h)
+            relus.append(self.respatialize(h))
+        h = self.norm(h)
+        # relus.append(self.respatialize(h))
+        h = self.head(h)
+        dinov2_outputs = namedtuple("DinoV2Outputs", ['relu1', 'relu2', 'relu3', 'relu4', 'relu5', 'relu6', 'relu7', 'relu8', 'relu9', 'relu10', 'relu11', 'relu12'])
+        out = dinov2_outputs._make(relus)
+        return out
+
+class efficientnetv2(torch.nn.Module):
+    def __init__(self, requires_grad=False, pretrained=True, size='s'):
+        super(efficientnetv2, self).__init__()
+        if(size=='s'):
+            effnet2_pretrained_features = tv.efficientnet_v2_s(pretrained=pretrained).features
+        elif(size=='m'):
+            effnet2_pretrained_features = tv.efficientnet_v2_m(pretrained=pretrained).features
+        elif(size=='l'):
+            effnet2_pretrained_features = tv.efficientnet_v2_l(pretrained=pretrained).features
+
+        # <class 'torchvision.ops.misc.Conv2dNormActivation'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torch.nn.modules.container.Sequential'>
+        # <class 'torchvision.ops.misc.Conv2dNormActivation'>
+
+        self.norm_in = effnet2_pretrained_features[0]
+        self.seq_1 = effnet2_pretrained_features[1]
+        self.seq_2 = effnet2_pretrained_features[2]
+        self.seq_3 = effnet2_pretrained_features[3]
+        self.seq_4 = effnet2_pretrained_features[4]
+        self.seq_5 = effnet2_pretrained_features[5]
+        self.seq_6 = effnet2_pretrained_features[6]
+        self.norm_out = effnet2_pretrained_features[7]
+        if not requires_grad:
+            for param in self.parameters():
+                param.requires_grad = False
+
+    def forward(self, X):
+        h = self.norm_in(X)
+        h = self.seq_1(h)
+        h_relu1 = h
+        h = self.seq_2(h)
+        h_relu2 = h
+        h = self.seq_3(h)
+        h_relu3 = h
+        h = self.seq_4(h)
+        h_relu4 = h
+        h = self.seq_5(h)
+        h_relu5 = h
+        h = self.seq_6(h)
+        h_relu6 = h
+        self.norm_out(h)
+        efficientnetv2_outputs = namedtuple("EffNetV2Outputs", ['relu1', 'relu2', 'relu3', 'relu4', 'relu5', 'relu6'])
+        out = efficientnetv2_outputs(h_relu1, h_relu2, h_relu3, h_relu4, h_relu5, h_relu6)
+        return out
 
 class resnet(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True, num=18):
         super(resnet, self).__init__()
         if(num==18):
-            self.net = tv.resnet18(pretrained=pretrained)
+            self.net = tv.resnet18(weights=tv.ResNet18_Weights.IMAGENET1K_V1)
         elif(num==34):
-            self.net = tv.resnet34(pretrained=pretrained)
+            self.net = tv.resnet34(weights=tv.ResNet34_Weights.IMAGENET1K_V1)
         elif(num==50):
-            self.net = tv.resnet50(pretrained=pretrained)
+            self.net = tv.resnet50(weights=tv.ResNet50_Weights.IMAGENET1K_V1)
         elif(num==101):
-            self.net = tv.resnet101(pretrained=pretrained)
+            self.net = tv.resnet101(weights=tv.ResNet101_Weights.IMAGENET1K_V1)
         elif(num==152):
-            self.net = tv.resnet152(pretrained=pretrained)
+            self.net = tv.resnet152(weights=tv.ResNet152_Weights.IMAGENET1K_V1)
         self.N_slices = 5
 
         self.conv1 = self.net.conv1
@@ -178,3 +294,4 @@ class resnet(torch.nn.Module):
         out = outputs(h_relu1, h_conv2, h_conv3, h_conv4, h_conv5)
 
         return out
+

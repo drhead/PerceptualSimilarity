@@ -10,7 +10,9 @@ from scipy.ndimage import zoom
 from tqdm import tqdm
 import lpips
 import os
-
+import bitsandbytes as bnb
+from adan import Adan
+from functools import partial
 
 class Trainer():
     def name(self):
@@ -64,19 +66,49 @@ class Trainer():
 
         if self.is_train: # training mode
             # extra network on top to go from distances (d0,d1) => predicted human judgment (h*)
+            # if net == 'dinov2':
+            #     self.rankLoss = lpips.BCERankingLoss1d()
+            # else:
             self.rankLoss = lpips.BCERankingLoss()
             self.parameters += list(self.rankLoss.net.parameters())
             self.lr = lr
             self.old_lr = lr
-            self.optimizer_net = torch.optim.Adam(self.parameters, lr=lr, betas=(beta1, 0.999))
+
         else: # test mode
             self.net.eval()
 
         if(use_gpu):
-            self.net.to(gpu_ids[0])
-            self.net = torch.nn.DataParallel(self.net, device_ids=gpu_ids)
+            self.net = self.net.to(gpu_ids[0], memory_format=torch.channels_last)
+            # self.net = torch.nn.DataParallel(self.net, device_ids=gpu_ids)
             if(self.is_train):
                 self.rankLoss = self.rankLoss.to(device=gpu_ids[0]) # just put this on GPU0
+
+        if self.is_train:
+            # self.optimizer_net = torch.optim.AdamW(self.parameters, lr=lr, betas=(beta1, 0.999))
+            # self.optimizer_net = bnb.optim.AdamW8bit(self.parameters, lr=lr, betas=(beta1, 0.999))
+            decay = []
+            no_decay = []
+            for name, param in self.net.named_parameters():
+                if not param.requires_grad:
+                    continue
+
+                if param.ndim <= 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+            for name, param in self.rankLoss.net.named_parameters():
+                if not param.requires_grad:
+                    continue
+
+                if param.ndim <= 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+            param_groups = [
+                {'params': no_decay, 'weight_decay': 0.},
+                {'params': decay, 'weight_decay': 0.02}]
+            self.optimizer_net = Adan(param_groups, lr=lr*10.0, foreach=True, fused=True)
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=23660, eta_min=0)
 
         if(printNet):
             print('---------- Networks initialized -------------')
@@ -94,62 +126,95 @@ class Trainer():
         return self.net.forward(in0, in1, retPerLayer=retPerLayer)
 
     # ***** TRAINING FUNCTIONS *****
-    def optimize_parameters(self):
-        self.forward_train()
-        self.optimizer_net.zero_grad()
-        self.backward_train()
-        self.optimizer_net.step()
-        self.clamp_weights()
+    def optimize_parameters(self, input, var):
+        # @partial(
+        #     torch.compile, 
+        #     options={
+        #         "trace.enabled": True,
+        #         # "triton.cudagraphs": True,
+        #         "max_autotune": True
+        #     })
+        def compiled_optimize(input, var):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                d0 = self.forward(var['ref'], var['p0'])
+                d1 = self.forward(var['ref'], var['p1'])
+                acc_r = self.compute_accuracy(d0, d1, input['judge'])
+
+                var['judge'] = Variable(1.*input['judge']).view(d0.size())
+
+                loss = self.rankLoss.forward(d0, d1, var['judge']*2.-1.)
+            torch.mean(loss).backward()
+            self.net.to(memory_format=torch.contiguous_format)
+            self.optimizer_net.step()
+            self.optimizer_net.zero_grad()
+            self.net.to(memory_format=torch.channels_last)
+            self.clamp_weights()
+            self.lr_scheduler.step()
+            return loss, acc_r
+        loss, acc_r = compiled_optimize(input, var)
+
+        return loss.detach().cpu().numpy(), acc_r.detach().cpu().numpy()
 
     def clamp_weights(self):
         for module in self.net.modules():
-            if(hasattr(module, 'weight') and module.kernel_size==(1,1)):
+            if(hasattr(module, 'weight') and hasattr(module, 'kernel_size') and module.kernel_size==(1,1)):
                 module.weight.data = torch.clamp(module.weight.data,min=0)
 
     def set_input(self, data):
-        self.input_ref = data['ref']
-        self.input_p0 = data['p0']
-        self.input_p1 = data['p1']
-        self.input_judge = data['judge']
+        input_ref = data['ref']
+        input_p0 = data['p0']
+        input_p1 = data['p1']
+        input_judge = data['judge']
 
         if(self.use_gpu):
-            self.input_ref = self.input_ref.to(device=self.gpu_ids[0])
-            self.input_p0 = self.input_p0.to(device=self.gpu_ids[0])
-            self.input_p1 = self.input_p1.to(device=self.gpu_ids[0])
-            self.input_judge = self.input_judge.to(device=self.gpu_ids[0])
+            input_ref = input_ref.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
+            input_p0 = input_p0.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
+            input_p1 = input_p1.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
+            input_judge = input_judge.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
 
-        self.var_ref = Variable(self.input_ref,requires_grad=True)
-        self.var_p0 = Variable(self.input_p0,requires_grad=True)
-        self.var_p1 = Variable(self.input_p1,requires_grad=True)
+        var_ref = Variable(input_ref,requires_grad=True)
+        var_p0 = Variable(input_p0,requires_grad=True)
+        var_p1 = Variable(input_p1,requires_grad=True)
+        input = {
+            'ref': input_ref,
+            'p0': input_p0,
+            'p1': input_p1,
+            'judge': input_judge,
+        }
+        var = {
+            'ref': var_ref,
+            'p0': var_p0,
+            'p1': var_p1
+        }
+        return input, var
 
-    def forward_train(self): # run forward pass
-        self.d0 = self.forward(self.var_ref, self.var_p0)
-        self.d1 = self.forward(self.var_ref, self.var_p1)
-        self.acc_r = self.compute_accuracy(self.d0,self.d1,self.input_judge)
+    # def forward_train(self): # run forward pass
+    #     self.d0 = self.forward(self.var_ref, self.var_p0)
+    #     self.d1 = self.forward(self.var_ref, self.var_p1)
+    #     acc_r = self.compute_accuracy(self.d0,self.d1,self.input_judge)
 
-        self.var_judge = Variable(1.*self.input_judge).view(self.d0.size())
+    #     self.var_judge = Variable(1.*self.input_judge).view(self.d0.size())
 
-        self.loss_total = self.rankLoss.forward(self.d0, self.d1, self.var_judge*2.-1.)
+    #     loss_total = self.rankLoss.forward(self.d0, self.d1, self.var_judge*2.-1.)
 
-        return self.loss_total
-
-    def backward_train(self):
-        torch.mean(self.loss_total).backward()
+    #     return loss_total, acc_r
 
     def compute_accuracy(self,d0,d1,judge):
         ''' d0, d1 are Variables, judge is a Tensor '''
-        d1_lt_d0 = (d1<d0).cpu().data.numpy().flatten()
-        judge_per = judge.cpu().numpy().flatten()
-        return d1_lt_d0*judge_per + (1-d1_lt_d0)*(1-judge_per)
+        d1_lt_d0 = (d1<d0).data.flatten()
+        judge_per = judge.flatten()
+        # print(d1_lt_d0)
+        # print(judge_per)
+        return d1_lt_d0*judge_per + (~d1_lt_d0)*(1-judge_per)
 
-    def get_current_errors(self):
-        retDict = OrderedDict([('loss_total', self.loss_total.data.cpu().numpy()),
-                            ('acc_r', self.acc_r)])
+    # def get_current_errors(self):
+    #     retDict = OrderedDict([('loss_total', self.loss_total.data.cpu().numpy()),
+    #                         ('acc_r', self.acc_r.data.cpu().numpy())])
 
-        for key in retDict.keys():
-            retDict[key] = np.mean(retDict[key])
+    #     for key in retDict.keys():
+    #         retDict[key] = np.mean(retDict[key])
 
-        return retDict
+    #     return retDict
 
     def get_current_visuals(self):
         zoom_factor = 256/self.var_ref.data.size()[2]
@@ -168,7 +233,7 @@ class Trainer():
 
     def save(self, path, label):
         if(self.use_gpu):
-            self.save_network(self.net.module, path, '', label)
+            self.save_network(self.net, path, '', label)
         else:
             self.save_network(self.net, path, '', label)
         self.save_network(self.rankLoss.net, path, 'rank', label)
@@ -229,8 +294,8 @@ def score_2afc_dataset(data_loader, func, name=''):
     gts = []
 
     for data in tqdm(data_loader.load_data(), desc=name):
-        d0s+=func(data['ref'],data['p0']).data.cpu().numpy().flatten().tolist()
-        d1s+=func(data['ref'],data['p1']).data.cpu().numpy().flatten().tolist()
+        d0s+=func(data['ref'].cuda(),data['p0'].cuda()).data.cpu().numpy().flatten().tolist()
+        d1s+=func(data['ref'].cuda(),data['p1'].cuda()).data.cpu().numpy().flatten().tolist()
         gts+=data['judge'].cpu().numpy().flatten().tolist()
 
     d0s = np.array(d0s)
@@ -259,7 +324,7 @@ def score_jnd_dataset(data_loader, func, name=''):
     gts = []
 
     for data in tqdm(data_loader.load_data(), desc=name):
-        ds+=func(data['p0'],data['p1']).data.cpu().numpy().tolist()
+        ds+=func(data['p0'].cuda(),data['p1'].cuda()).data.cpu().numpy().tolist()
         gts+=data['same'].cpu().numpy().flatten().tolist()
 
     sames = np.array(gts)

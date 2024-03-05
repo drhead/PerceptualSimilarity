@@ -5,6 +5,7 @@ from data.image_folder import make_dataset
 from PIL import Image
 import numpy as np
 import torch
+from tqdm import tqdm
 # from IPython import embed
 
 class TwoAFCDataset(BaseDataset):

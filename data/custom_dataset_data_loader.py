@@ -30,7 +30,10 @@ class CustomDatasetDataLoader(BaseDataLoader):
             self.dataset,
             batch_size=batch_size,
             shuffle=not serial_batches,
-            num_workers=int(nThreads))
+            num_workers=int(nThreads),
+            pin_memory=True,
+            prefetch_factor=4,
+            drop_last=True)
 
     def load_data(self):
         return self.dataloader
