@@ -19,8 +19,8 @@ class Trainer():
         return self.model_name
 
     def initialize(self, model='lpips', net='alex', colorspace='Lab', pnet_rand=False, pnet_tune=False, model_path=None,
-            use_gpu=True, printNet=False, spatial=False, 
-            is_train=False, lr=.0001, beta1=0.5, version='0.1', gpu_ids=[0]):
+            device='cuda', printNet=False, spatial=False, 
+            is_train=False, lr=.0001, beta1=0.5, version='0.1'):
         '''
         INPUTS
             model - ['lpips'] for linearly calibrated network
@@ -39,8 +39,8 @@ class Trainer():
             version - 0.1 for latest, 0.0 was original (with a bug)
             gpu_ids - int array - [0] by default, gpus to use
         '''
-        self.use_gpu = use_gpu
-        self.gpu_ids = gpu_ids
+
+        self.device = device
         self.model = model
         self.net = net
         self.is_train = is_train
@@ -54,10 +54,10 @@ class Trainer():
         elif(self.model=='baseline'): # pretrained network
             self.net = lpips.LPIPS(pnet_rand=pnet_rand, net=net, lpips=False)
         elif(self.model in ['L2','l2']):
-            self.net = lpips.L2(use_gpu=use_gpu,colorspace=colorspace) # not really a network, only for testing
+            self.net = lpips.L2(colorspace=colorspace) # not really a network, only for testing
             self.model_name = 'L2'
         elif(self.model in ['DSSIM','dssim','SSIM','ssim']):
-            self.net = lpips.DSSIM(use_gpu=use_gpu,colorspace=colorspace)
+            self.net = lpips.DSSIM(colorspace=colorspace)
             self.model_name = 'SSIM'
         else:
             raise ValueError("Model [%s] not recognized." % self.model)
@@ -66,22 +66,19 @@ class Trainer():
 
         if self.is_train: # training mode
             # extra network on top to go from distances (d0,d1) => predicted human judgment (h*)
-            # if net == 'dinov2':
-            #     self.rankLoss = lpips.BCERankingLoss1d()
-            # else:
             self.rankLoss = lpips.BCERankingLoss()
             self.parameters += list(self.rankLoss.net.parameters())
             self.lr = lr
             self.old_lr = lr
+            self.net.train()
 
         else: # test mode
             self.net.eval()
 
-        if(use_gpu):
-            self.net = self.net.to(gpu_ids[0], memory_format=torch.channels_last)
-            # self.net = torch.nn.DataParallel(self.net, device_ids=gpu_ids)
-            if(self.is_train):
-                self.rankLoss = self.rankLoss.to(device=gpu_ids[0]) # just put this on GPU0
+        self.net = self.net.to(self.device, memory_format=torch.channels_last)
+
+        if(self.is_train):
+            self.rankLoss = self.rankLoss.to(device=self.device, memory_format=torch.channels_last) # just put this on GPU0
 
         if self.is_train:
             # self.optimizer_net = torch.optim.AdamW(self.parameters, lr=lr, betas=(beta1, 0.999))
@@ -107,7 +104,7 @@ class Trainer():
             param_groups = [
                 {'params': no_decay, 'weight_decay': 0.},
                 {'params': decay, 'weight_decay': 0.02}]
-            self.optimizer_net = Adan(param_groups, lr=lr*10.0, foreach=True, fused=True)
+            self.optimizer_net = Adan(param_groups, lr=lr*10.0)
             self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=23660, eta_min=0)
 
         if(printNet):
@@ -125,81 +122,68 @@ class Trainer():
 
         return self.net.forward(in0, in1, retPerLayer=retPerLayer)
 
+    # def inspect_grad_fn(self, grad_fn, depth):
+    #     if callable(grad_fn):
+    #         print(f"depth {depth}: {grad_fn} -> {grad_fn.next_functions}") 
+    #         for item in grad_fn.next_functions:
+    #             self.inspect_grad_fn(item, depth+1)
+    #     elif isinstance(grad_fn, tuple):
+    #         for item in grad_fn:
+    #             self.inspect_grad_fn(item, depth+1)
+
     # ***** TRAINING FUNCTIONS *****
-    def optimize_parameters(self, input, var):
-        # @partial(
-        #     torch.compile, 
-        #     options={
-        #         "trace.enabled": True,
-        #         # "triton.cudagraphs": True,
-        #         "max_autotune": True
-        #     })
-        def compiled_optimize(input, var):
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                d0 = self.forward(var['ref'], var['p0'])
-                d1 = self.forward(var['ref'], var['p1'])
-                acc_r = self.compute_accuracy(d0, d1, input['judge'])
+    # @partial(
+    #     torch.compile,
+    #     backend='eager'
+    #     # options={
+    #     #     # "trace.enabled": True,
+    #     #     # "trace.graph_diagram": True,
+    #     #     # "triton.cudagraphs": True,
+    #     #     # "max_autotune": True
+    #     # }
+    # )
+    @partial(torch.compile,
+        backend="inductor",
+        options={
+            "triton.cudagraphs": True,
+            "max_autotune": True,
+            "max_autotune_pointwise": True,
+            "max_autotune_gemm": True,
+            "max_autotune_gemm_backends": "ATEN,TRITON",
+            "disable_progress": False,
 
-                var['judge'] = Variable(1.*input['judge']).view(d0.size())
+        })
+    def compiled_training(self, ref, p0, p1, judge):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            d0 = self.net.forward(ref, p0)
+            d1 = self.net.forward(ref, p1)
+            loss = self.rankLoss.forward(d0, d1, judge*2.-1.)
+            acc_r = self.compute_accuracy(d0, d1, judge)
+        loss.backward()
+        return loss, acc_r
 
-                loss = self.rankLoss.forward(d0, d1, var['judge']*2.-1.)
-            torch.mean(loss).backward()
-            self.net.to(memory_format=torch.contiguous_format)
-            self.optimizer_net.step()
-            self.optimizer_net.zero_grad()
-            self.net.to(memory_format=torch.channels_last)
-            self.clamp_weights()
-            self.lr_scheduler.step()
-            return loss, acc_r
-        loss, acc_r = compiled_optimize(input, var)
-
-        return loss.detach().cpu().numpy(), acc_r.detach().cpu().numpy()
+    def optimize_parameters(self, ref, p0, p1, judge):
+        loss, acc_r = self.compiled_training(ref, p0, p1, judge)
+        self.optimizer_net.step()
+        self.lr_scheduler.step()
+        self.optimizer_net.zero_grad()
+        self.clamp_weights()
+        return loss, acc_r
 
     def clamp_weights(self):
-        for module in self.net.modules():
+        for module in self.net.lins.modules():
             if(hasattr(module, 'weight') and hasattr(module, 'kernel_size') and module.kernel_size==(1,1)):
-                module.weight.data = torch.clamp(module.weight.data,min=0)
+                module.weight.data.clamp_(min=0)
 
     def set_input(self, data):
-        input_ref = data['ref']
-        input_p0 = data['p0']
-        input_p1 = data['p1']
-        input_judge = data['judge']
+        ref = data['ref'].to(device=self.device, memory_format=torch.channels_last)
+        p0 = data['p0'].to(device=self.device, memory_format=torch.channels_last)
+        p1 = data['p1'].to(device=self.device, memory_format=torch.channels_last)
+        judge = data['judge'].to(device=self.device, memory_format=torch.channels_last)
 
-        if(self.use_gpu):
-            input_ref = input_ref.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
-            input_p0 = input_p0.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
-            input_p1 = input_p1.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
-            input_judge = input_judge.to(device=self.gpu_ids[0], memory_format=torch.channels_last)
+        return ref, p0, p1, judge
 
-        var_ref = Variable(input_ref,requires_grad=True)
-        var_p0 = Variable(input_p0,requires_grad=True)
-        var_p1 = Variable(input_p1,requires_grad=True)
-        input = {
-            'ref': input_ref,
-            'p0': input_p0,
-            'p1': input_p1,
-            'judge': input_judge,
-        }
-        var = {
-            'ref': var_ref,
-            'p0': var_p0,
-            'p1': var_p1
-        }
-        return input, var
-
-    # def forward_train(self): # run forward pass
-    #     self.d0 = self.forward(self.var_ref, self.var_p0)
-    #     self.d1 = self.forward(self.var_ref, self.var_p1)
-    #     acc_r = self.compute_accuracy(self.d0,self.d1,self.input_judge)
-
-    #     self.var_judge = Variable(1.*self.input_judge).view(self.d0.size())
-
-    #     loss_total = self.rankLoss.forward(self.d0, self.d1, self.var_judge*2.-1.)
-
-    #     return loss_total, acc_r
-
-    def compute_accuracy(self,d0,d1,judge):
+    def compute_accuracy(self, d0: torch.Tensor, d1: torch.Tensor, judge: torch.Tensor) -> torch.Tensor:
         ''' d0, d1 are Variables, judge is a Tensor '''
         d1_lt_d0 = (d1<d0).data.flatten()
         judge_per = judge.flatten()
@@ -207,35 +191,23 @@ class Trainer():
         # print(judge_per)
         return d1_lt_d0*judge_per + (~d1_lt_d0)*(1-judge_per)
 
-    # def get_current_errors(self):
-    #     retDict = OrderedDict([('loss_total', self.loss_total.data.cpu().numpy()),
-    #                         ('acc_r', self.acc_r.data.cpu().numpy())])
+    def get_visuals(self, ref: torch.Tensor, p0: torch.Tensor, p1: torch.Tensor):
+        zoom_factor = 256/ref.size()[2]
 
-    #     for key in retDict.keys():
-    #         retDict[key] = np.mean(retDict[key])
-
-    #     return retDict
-
-    def get_current_visuals(self):
-        zoom_factor = 256/self.var_ref.data.size()[2]
-
-        ref_img = lpips.tensor2im(self.var_ref.data)
-        p0_img = lpips.tensor2im(self.var_p0.data)
-        p1_img = lpips.tensor2im(self.var_p1.data)
+        ref_img = lpips.tensor2im(ref)
+        p0_img = lpips.tensor2im(p0)
+        p1_img = lpips.tensor2im(p1)
 
         ref_img_vis = zoom(ref_img,[zoom_factor, zoom_factor, 1],order=0)
         p0_img_vis = zoom(p0_img,[zoom_factor, zoom_factor, 1],order=0)
         p1_img_vis = zoom(p1_img,[zoom_factor, zoom_factor, 1],order=0)
 
-        return OrderedDict([('ref', ref_img_vis),
-                            ('p0', p0_img_vis),
-                            ('p1', p1_img_vis)])
+        return OrderedDict([('img/ref', ref_img_vis),
+                            ('img/p0', p0_img_vis),
+                            ('img/p1', p1_img_vis)])
 
     def save(self, path, label):
-        if(self.use_gpu):
-            self.save_network(self.net, path, '', label)
-        else:
-            self.save_network(self.net, path, '', label)
+        self.save_network(self.net, path, '', label)
         self.save_network(self.rankLoss.net, path, 'rank', label)
 
     # helper saving function that can be used by subclasses

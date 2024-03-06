@@ -24,7 +24,7 @@ parser.add_argument('--train_trunk', action='store_true', help='model trunk was 
 parser.add_argument('--version', type=str, default='0.1', help='v0.1 is latest, v0.0 was original release')
 parser.add_argument('--wandb', type=bool, default=False, help='Log validation to wandb as the last training run')
 
-# wandb.init(project="lpips", id="38fof0v2", resume="must")
+# wandb.init(project="lpips", id="ec7mleqe", resume="must")
 
 opt = parser.parse_args()
 if(opt.model in ['l2','ssim']):

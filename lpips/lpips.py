@@ -84,7 +84,8 @@ class LPIPS(nn.Module):
             self.chns = [64,128,256,384,384,512,512]
         elif(self.pnet_type=='resnet'):
             net_type = pn.resnet
-            self.chns = [64,64,128,256,512]
+            # self.chns = [64,64,128,256,512] # resnet18
+            self.chns = [64,256,512,1024,2048]
         elif(self.pnet_type=='efficientnetv2'):
             net_type = pn.efficientnetv2
             self.chns = [24,48,64,128,160,256]
@@ -100,21 +101,8 @@ class LPIPS(nn.Module):
             self.lins = []
             for chn in self.chns:
                 self.lins += [lin_layer(chn, use_dropout=use_dropout)]
-            print(len(self.lins))
-            # self.lin0 = NetLinLayer(self.chns[0], use_dropout=use_dropout)
-            # self.lin1 = NetLinLayer(self.chns[1], use_dropout=use_dropout)
-            # self.lin2 = NetLinLayer(self.chns[2], use_dropout=use_dropout)
-            # self.lin3 = NetLinLayer(self.chns[3], use_dropout=use_dropout)
-            # self.lin4 = NetLinLayer(self.chns[4], use_dropout=use_dropout)
-            # self.lins = [self.lin0,self.lin1,self.lin2,self.lin3,self.lin4]
-            # if(self.pnet_type=='squeeze' or self.pnet_type=='efficientnetv2'): # 7 layers for squeezenet
-            #     self.lin5 = NetLinLayer(self.chns[5], use_dropout=use_dropout)
-            #     self.lins+=[self.lin5]
-            # if(self.pnet_type=='squeeze'):
-            #     self.lin6 = NetLinLayer(self.chns[6], use_dropout=use_dropout)
-            #     self.lins+=[self.lin6]
+
             self.lins = nn.ModuleList(self.lins)
-            print(len(self.lins))
             if(pretrained):
                 if(model_path is None):
                     import inspect
@@ -222,7 +210,7 @@ class BCERankingLoss(nn.Module):
         # self.loss = torch.nn.BCELoss()
         self.loss = torch.nn.BCEWithLogitsLoss()
 
-    def forward(self, d0, d1, judge):
+    def forward(self, d0, d1, judge) -> torch.Tensor:
         per = (judge+1.)/2.
         self.logit = self.net.forward(d0,d1)
         return self.loss(self.logit, per)

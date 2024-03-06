@@ -4,6 +4,14 @@ cudnn.benchmark=False
 import numpy as np
 import time
 import os
+os.environ['ACCELERATE_DYNAMO_MODE'] = "max-autotune-no-cudagraphs"
+# os.environ['ACCELERATE_DYNAMO_USE_FULLGRAPH'] = "True"
+# os.environ["TORCHDYNAMO_REPRO_LEVEL"] = '4'
+import torch
+
+# torch._dynamo.config.verify_correctness = True
+# torch._dynamo.config.repro_level = 4
+# torch._dynamo.config.verbose = True
 import lpips
 from data import data_loader as dl
 import argparse
@@ -11,10 +19,19 @@ from util.visualizer import Visualizer
 from IPython import embed
 from tqdm import tqdm
 import wandb
-
-wandb.init(
-    # set the wandb project where this run will be logged
-    project="lpips")
+# from accelerate import Accelerator
+# from accelerate.utils import DynamoBackend
+# accelerator = Accelerator(
+#     mixed_precision='bf16',
+#     dynamo_backend=DynamoBackend.INDUCTOR)
+# device = accelerator.device
+use_wandb = False
+torch._inductor.list_options()
+if use_wandb:
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="lpips",
+        name="vgg-adan-newbaseline")
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--datasets', type=str, nargs='+', default=['train/traditional','train/cnn','train/mix'], help='datasets to train on: [train/traditional],[train/cnn],[train/mix],[val/traditional],[val/cnn],[val/color],[val/deblur],[val/frameinterp],[val/superres]')
@@ -49,11 +66,13 @@ if(not os.path.exists(opt.save_dir)):
 
 # initialize model
 trainer = lpips.Trainer()
-trainer.initialize(model=opt.model, net=opt.net, use_gpu=opt.use_gpu, is_train=True, 
-    pnet_rand=opt.from_scratch, pnet_tune=opt.train_trunk, gpu_ids=opt.gpu_ids)
+trainer.initialize(model=opt.model, net=opt.net, device='cuda', is_train=True, 
+    pnet_rand=opt.from_scratch, pnet_tune=opt.train_trunk)
+
+img_size = 56 if opt.net=='efficientnetv2' else 64
 
 # load data from all training sets
-data_loader = dl.CreateDataLoader(opt.datasets,dataset_mode='2afc', batch_size=opt.batch_size, load_size=56, serial_batches=False, nThreads=opt.nThreads)
+data_loader = dl.CreateDataLoader(opt.datasets,dataset_mode='2afc', batch_size=opt.batch_size, load_size=img_size, serial_batches=False, nThreads=opt.nThreads)
 dataset = data_loader.load_data()
 dataset_size = len(data_loader)
 D = len(dataset)
@@ -63,42 +82,68 @@ visualizer = Visualizer(opt)
 total_steps = 0
 fid = open(os.path.join(opt.checkpoints_dir,opt.name,'train_log.txt'),'w+')
 
+ema_loss = None
+ema_accuracy = None
+alpha = 0.95
+
 for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
     epoch_start_time = time.time()
-    for i, data in tqdm(enumerate(dataset), desc=f"Training (Epoch {epoch})...", total=dataset_size//64):
-        iter_start_time = time.time()
-        total_steps += opt.batch_size
-        epoch_iter = total_steps - dataset_size * (epoch - 1)
+    with tqdm(
+            desc=f"Training (Epoch {epoch})...",
+            total=dataset_size//64,
+            dynamic_ncols=True) as pbar:
+        for i, data in enumerate(dataset):
+            iter_start_time = time.time()
+            total_steps += opt.batch_size
+            epoch_iter = total_steps - dataset_size * (epoch - 1)
 
-        input, var = trainer.set_input(data)
-        errors = {}
-        errors['loss_total'], errors['acc_r'] = trainer.optimize_parameters(input, var)
-        # print(f"loss: {errors['loss_total']}, acc: {errors['acc_r'].mean()}")
-        # errors = trainer.get_current_errors()
-        wandb.log({
-            'loss_total': errors['loss_total'],
-            'acc_r': np.mean(errors['acc_r'])
-        })
-        # if total_steps % opt.display_freq == 0:
-        #     visualizer.display_current_results(trainer.get_current_visuals(), epoch)
+            ref, p0, p1, judge = trainer.set_input(data)
+            errors = {}
+            loss, acc_r = trainer.optimize_parameters(ref, p0, p1, judge)
+            loss = loss.detach().cpu().numpy()
+            acc_r = np.mean(acc_r.detach().cpu().numpy())
+            pbar.update(1)
+            if ema_loss is None:
+                ema_loss = loss
+            else:
+                ema_loss = alpha * ema_loss + (1 - alpha) * loss
 
-        # if total_steps % opt.print_freq == 0:
-        #     # errors = trainer.get_current_errors()
-        #     t = (time.time()-iter_start_time)/opt.batch_size
-        #     t2o = (time.time()-epoch_start_time)/3600.
-        #     t2 = t2o*D/(i+.0001)
-        #     visualizer.print_current_errors(epoch, epoch_iter, errors, t, t2=t2, t2o=t2o, fid=fid)
+            if ema_accuracy is None:
+                ema_accuracy = acc_r
+            else:
+                ema_accuracy = alpha * ema_accuracy + (1 - alpha) * acc_r
+            pbar.set_postfix(loss=f'{ema_loss:.4f}', accuracy=f'{ema_accuracy:.4f}', refresh=False)
+            # if not use_wandb:
+                # print(f"loss: {errors['loss_total'].detach().cpu().numpy()}, acc: {errors['acc_r'].detach().cpu().numpy().mean()}")
+            # errors = trainer.get_current_errors()
+            if use_wandb:
+                wandb.log({
+                    'loss_total': loss,
+                    'acc_r': acc_r},
+                    commit=False
+                )
+            if total_steps % opt.display_freq == 0 and use_wandb:
+                wandb.log(trainer.get_visuals(), commit=False)
 
-        #     for key in errors.keys():
-        #         visualizer.plot_current_errors_save(epoch, float(epoch_iter)/dataset_size, opt, errors, keys=[key,], name=key, to_plot=opt.train_plot)
+            # if total_steps % opt.print_freq == 0:
+            #     # errors = trainer.get_current_errors()
+            #     t = (time.time()-iter_start_time)/opt.batch_size
+            #     t2o = (time.time()-epoch_start_time)/3600.
+            #     t2 = t2o*D/(i+.0001)
+            #     visualizer.print_current_errors(epoch, epoch_iter, errors, t, t2=t2, t2o=t2o, fid=fid)
 
-        #     if opt.display_id > 0:
-        #         visualizer.plot_current_errors(epoch, float(epoch_iter)/dataset_size, opt, errors)
+            #     for key in errors.keys():
+            #         visualizer.plot_current_errors_save(epoch, float(epoch_iter)/dataset_size, opt, errors, keys=[key,], name=key, to_plot=opt.train_plot)
 
-        if total_steps % opt.save_latest_freq == 0:
-            # print('saving the latest model (epoch %d, total_steps %d)' %
-            #       (epoch, total_steps))
-            trainer.save(opt.save_dir, 'latest')
+            #     if opt.display_id > 0:
+            #         visualizer.plot_current_errors(epoch, float(epoch_iter)/dataset_size, opt, errors)
+
+            if total_steps % opt.save_latest_freq == 0:
+                # print('saving the latest model (epoch %d, total_steps %d)' %
+                #       (epoch, total_steps))
+                trainer.save(opt.save_dir, 'latest')
+            if use_wandb:
+                wandb.log(commit=True)
 
     if epoch % opt.save_epoch_freq == 0:
         print('saving the model at the end of epoch %d, iters %d' %
@@ -111,6 +156,20 @@ for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
 
     # if epoch > opt.nepoch:
     #     trainer.update_learning_rate(opt.nepoch_decay)
+
+# initialize data loader
+for dataset in opt.datasets:
+    data_loader = dl.CreateDataLoader(dataset,dataset_mode=opt.dataset_mode, load_size=img_size, batch_size=opt.batch_size, nThreads=opt.nThreads)
+
+    # evaluate model on data
+    if(opt.dataset_mode=='2afc'):
+        (score, results_verbose) = lpips.score_2afc_dataset(data_loader, trainer.forward, name=dataset)
+    elif(opt.dataset_mode=='jnd'):
+        (score, results_verbose) = lpips.score_jnd_dataset(data_loader, trainer.forward, name=dataset)
+    if use_wandb:
+        wandb.log({dataset: score})
+    # print results
+    print('  Dataset [%s]: %.2f'%(dataset,100.*score))
 
 # trainer.save_done(True)
 fid.close()
