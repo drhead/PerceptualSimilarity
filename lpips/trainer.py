@@ -20,7 +20,7 @@ class Trainer():
 
     def initialize(self, model='lpips', net='alex', colorspace='Lab', pnet_rand=False, pnet_tune=False, model_path=None,
             device='cuda', printNet=False, spatial=False, 
-            is_train=False, lr=.0001, beta1=0.5, version='0.1'):
+            is_train=False, lr=.0001, beta1=0.5, version='0.1', T_max=23600, optimizer='adam', schedule='none', no_decay_bias=False):
         '''
         INPUTS
             model - ['lpips'] for linearly calibrated network
@@ -46,6 +46,7 @@ class Trainer():
         self.is_train = is_train
         self.spatial = spatial
         self.model_name = '%s [%s]'%(model,net)
+        self.schedule = schedule
 
         if(self.model == 'lpips'): # pretrained net + linear layer
             self.net = lpips.LPIPS(pretrained=not is_train, net=net, version=version, lpips=True, spatial=spatial, 
@@ -77,35 +78,44 @@ class Trainer():
 
         self.net = self.net.to(self.device, memory_format=torch.channels_last)
 
-        if(self.is_train):
-            self.rankLoss = self.rankLoss.to(device=self.device, memory_format=torch.channels_last) # just put this on GPU0
-
         if self.is_train:
-            # self.optimizer_net = torch.optim.AdamW(self.parameters, lr=lr, betas=(beta1, 0.999))
-            # self.optimizer_net = bnb.optim.AdamW8bit(self.parameters, lr=lr, betas=(beta1, 0.999))
-            decay = []
-            no_decay = []
-            for name, param in self.net.named_parameters():
-                if not param.requires_grad:
-                    continue
+            self.rankLoss = self.rankLoss.to(device=self.device, memory_format=torch.channels_last) # just put this on GPU0
+            if no_decay_bias:
+                decay = []
+                no_decay = []
+                for name, param in self.net.named_parameters():
+                    if not param.requires_grad:
+                        continue
 
-                if param.ndim <= 1 or name.endswith(".bias"):
-                    no_decay.append(param)
-                else:
-                    decay.append(param)
-            for name, param in self.rankLoss.net.named_parameters():
-                if not param.requires_grad:
-                    continue
+                    if param.ndim <= 1 or name.endswith(".bias"):
+                        no_decay.append(param)
+                    else:
+                        decay.append(param)
+                for name, param in self.rankLoss.net.named_parameters():
+                    if not param.requires_grad:
+                        continue
 
-                if param.ndim <= 1 or name.endswith(".bias"):
-                    no_decay.append(param)
-                else:
-                    decay.append(param)
-            param_groups = [
-                {'params': no_decay, 'weight_decay': 0.},
-                {'params': decay, 'weight_decay': 0.02}]
-            self.optimizer_net = Adan(param_groups, lr=lr*10.0)
-            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=23660, eta_min=0)
+                    if param.ndim <= 1 or name.endswith(".bias"):
+                        no_decay.append(param)
+                    else:
+                        decay.append(param)
+                optim_params = [
+                    {'params': no_decay, 'weight_decay': 0.},
+                    {'params': decay, 'weight_decay': 0.02}]
+            else: optim_params = self.parameters
+
+            if optimizer == 'adam':
+                self.optimizer_net = torch.optim.Adam(optim_params, lr=lr, betas=(beta1, 0.999))
+            elif optimizer == 'adamw':
+                self.optimizer_net = torch.optim.AdamW(optim_params, lr=lr, betas=(beta1, 0.999))
+            elif optimizer == 'adan':
+                self.optimizer_net = Adan(optim_params, lr=lr)
+
+            if self.schedule == 'cosine':
+                self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=T_max, eta_min=0)
+            elif self.schedule == 'linear':
+                lr_lambda = lambda step: max(1e-6, 1.0 - step / T_max)
+                self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer_net, lr_lambda=lr_lambda)
 
         if(printNet):
             print('---------- Networks initialized -------------')
@@ -132,16 +142,6 @@ class Trainer():
     #             self.inspect_grad_fn(item, depth+1)
 
     # ***** TRAINING FUNCTIONS *****
-    # @partial(
-    #     torch.compile,
-    #     backend='eager'
-    #     # options={
-    #     #     # "trace.enabled": True,
-    #     #     # "trace.graph_diagram": True,
-    #     #     # "triton.cudagraphs": True,
-    #     #     # "max_autotune": True
-    #     # }
-    # )
     @partial(torch.compile,
         backend="inductor",
         options={
@@ -150,8 +150,6 @@ class Trainer():
             "max_autotune_pointwise": True,
             "max_autotune_gemm": True,
             "max_autotune_gemm_backends": "ATEN,TRITON",
-            "disable_progress": False,
-
         })
     def compiled_training(self, ref, p0, p1, judge):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -165,7 +163,8 @@ class Trainer():
     def optimize_parameters(self, ref, p0, p1, judge):
         loss, acc_r = self.compiled_training(ref, p0, p1, judge)
         self.optimizer_net.step()
-        self.lr_scheduler.step()
+        if self.schedule != 'none':
+            self.lr_scheduler.step()
         self.optimizer_net.zero_grad()
         self.clamp_weights()
         return loss, acc_r
@@ -192,6 +191,7 @@ class Trainer():
         return d1_lt_d0*judge_per + (~d1_lt_d0)*(1-judge_per)
 
     def get_visuals(self, ref: torch.Tensor, p0: torch.Tensor, p1: torch.Tensor):
+        import wandb
         zoom_factor = 256/ref.size()[2]
 
         ref_img = lpips.tensor2im(ref)
@@ -202,9 +202,9 @@ class Trainer():
         p0_img_vis = zoom(p0_img,[zoom_factor, zoom_factor, 1],order=0)
         p1_img_vis = zoom(p1_img,[zoom_factor, zoom_factor, 1],order=0)
 
-        return OrderedDict([('img/ref', ref_img_vis),
-                            ('img/p0', p0_img_vis),
-                            ('img/p1', p1_img_vis)])
+        return OrderedDict([('img/ref', wandb.Image(ref_img_vis)),
+                            ('img/p0', wandb.Image(p0_img_vis)),
+                            ('img/p1', wandb.Image(p1_img_vis))])
 
     def save(self, path, label):
         self.save_network(self.net, path, '', label)
@@ -265,7 +265,7 @@ def score_2afc_dataset(data_loader, func, name=''):
     d1s = []
     gts = []
 
-    for data in tqdm(data_loader.load_data(), desc=name):
+    for data in tqdm(data_loader.load_data(), desc=name, leave=False):
         d0s+=func(data['ref'].cuda(),data['p0'].cuda()).data.cpu().numpy().flatten().tolist()
         d1s+=func(data['ref'].cuda(),data['p1'].cuda()).data.cpu().numpy().flatten().tolist()
         gts+=data['judge'].cpu().numpy().flatten().tolist()

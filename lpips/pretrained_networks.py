@@ -97,7 +97,7 @@ class alexnet(torch.nn.Module):
         return out
 
 class vgg16(torch.nn.Module):
-    def __init__(self, requires_grad=False, pretrained=True):
+    def __init__(self, requires_grad=False, pretrained=True, model=None):
         super(vgg16, self).__init__()
         weights = tv.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
         vgg_pretrained_features = tv.vgg16(weights=weights).features
@@ -202,13 +202,13 @@ class dinov2(torch.nn.Module):
         return out
 
 class efficientnetv2(torch.nn.Module):
-    def __init__(self, requires_grad=False, pretrained=True, size='s'):
+    def __init__(self, requires_grad=False, pretrained=True, model='s'):
         super(efficientnetv2, self).__init__()
-        if(size=='s'):
+        if(model=='s'):
             effnet2_pretrained_features = tv.efficientnet_v2_s(weights=tv.EfficientNet_V2_S_Weights.IMAGENET1K_V1).features
-        elif(size=='m'):
+        elif(model=='m'):
             effnet2_pretrained_features = tv.efficientnet_v2_m(weights=tv.EfficientNet_V2_M_Weights.IMAGENET1K_V1).features
-        elif(size=='l'):
+        elif(model=='l'):
             effnet2_pretrained_features = tv.efficientnet_v2_l(weights=tv.EfficientNet_V2_L_Weights.IMAGENET1K_V1).features
 
         # <class 'torchvision.ops.misc.Conv2dNormActivation'>
@@ -252,17 +252,17 @@ class efficientnetv2(torch.nn.Module):
         return out
 
 class resnet(torch.nn.Module):
-    def __init__(self, requires_grad=False, pretrained=True, num=50):
+    def __init__(self, requires_grad=False, pretrained=True, model=18):
         super(resnet, self).__init__()
-        if(num==18):
+        if(model==18):
             self.net = tv.resnet18(weights=tv.ResNet18_Weights.IMAGENET1K_V1)
-        elif(num==34):
+        elif(model==34):
             self.net = tv.resnet34(weights=tv.ResNet34_Weights.IMAGENET1K_V1)
-        elif(num==50):
+        elif(model==50):
             self.net = tv.resnet50(weights=tv.ResNet50_Weights.IMAGENET1K_V2)
-        elif(num==101):
+        elif(model==101):
             self.net = tv.resnet101(weights=tv.ResNet101_Weights.IMAGENET1K_V2)
-        elif(num==152):
+        elif(model==152):
             self.net = tv.resnet152(weights=tv.ResNet152_Weights.IMAGENET1K_V2)
         self.N_slices = 5
 

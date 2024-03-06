@@ -71,7 +71,7 @@ class LPIPS(nn.Module):
         self.lpips = lpips # false means baseline of just averaging all layers
         self.version = version
         self.scaling_layer = ScalingLayer()
-
+        model=None
         lin_layer = NetLinLayer
         if(self.pnet_type in ['vgg','vgg16']):
             net_type = pn.vgg16
@@ -82,20 +82,23 @@ class LPIPS(nn.Module):
         elif(self.pnet_type=='squeeze'):
             net_type = pn.squeezenet
             self.chns = [64,128,256,384,384,512,512]
-        elif(self.pnet_type=='resnet'):
+        elif(self.pnet_type=='resnet18'):
             net_type = pn.resnet
-            # self.chns = [64,64,128,256,512] # resnet18
+            self.chns = [64,64,128,256,512] # resnet18
+            model = 18
+        elif(self.pnet_type=='resnet50v2'):
+            net_type = pn.resnet
             self.chns = [64,256,512,1024,2048]
+            model = 50
         elif(self.pnet_type=='efficientnetv2'):
             net_type = pn.efficientnetv2
             self.chns = [24,48,64,128,160,256]
         elif(self.pnet_type=='dinov2'):
             net_type = pn.dinov2
-            # lin_layer = NetLinLayer1d
             self.chns = [384 for _ in range(12)]
         self.L = len(self.chns)
 
-        self.net = net_type(pretrained=not self.pnet_rand, requires_grad=self.pnet_tune)
+        self.net = net_type(pretrained=not self.pnet_rand, requires_grad=self.pnet_tune, model=model)
 
         if(lpips):
             self.lins = []

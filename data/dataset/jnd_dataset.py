@@ -8,7 +8,7 @@ import torch
 from IPython import embed
 
 class JNDDataset(BaseDataset):
-    def initialize(self, dataroot, load_size=64):
+    def initialize(self, dataroot, load_size=64, use_cache=False):
         self.root = dataroot
         self.load_size = load_size
 
