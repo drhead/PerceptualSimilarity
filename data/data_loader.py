@@ -6,7 +6,8 @@ def CreateDataLoader(
         batch_size=1,
         serial_batches=True,
         nThreads=4,
-        use_cache=False
+        use_cache=False,
+        colorspace='srgb'
         ):
     from data.custom_dataset_data_loader import CustomDatasetDataLoader
     data_loader = CustomDatasetDataLoader()
@@ -19,5 +20,6 @@ def CreateDataLoader(
         batch_size=batch_size,
         serial_batches=serial_batches,
         nThreads=nThreads,
-        use_cache=use_cache)
+        use_cache=use_cache,
+        colorspace=colorspace)
     return data_loader

@@ -255,15 +255,15 @@ class resnet(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True, model=18):
         super(resnet, self).__init__()
         if(model==18):
-            self.net = tv.resnet18(weights=tv.ResNet18_Weights.IMAGENET1K_V1)
+            self.net = tv.resnet18(weights=tv.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         elif(model==34):
-            self.net = tv.resnet34(weights=tv.ResNet34_Weights.IMAGENET1K_V1)
+            self.net = tv.resnet34(weights=tv.ResNet34_Weights.IMAGENET1K_V1 if pretrained else None)
         elif(model==50):
-            self.net = tv.resnet50(weights=tv.ResNet50_Weights.IMAGENET1K_V2)
+            self.net = tv.resnet50(weights=tv.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None)
         elif(model==101):
-            self.net = tv.resnet101(weights=tv.ResNet101_Weights.IMAGENET1K_V2)
+            self.net = tv.resnet101(weights=tv.ResNet101_Weights.IMAGENET1K_V2 if pretrained else None)
         elif(model==152):
-            self.net = tv.resnet152(weights=tv.ResNet152_Weights.IMAGENET1K_V2)
+            self.net = tv.resnet152(weights=tv.ResNet152_Weights.IMAGENET1K_V2 if pretrained else None)
         self.N_slices = 5
 
         self.conv1 = self.net.conv1
@@ -295,3 +295,44 @@ class resnet(torch.nn.Module):
 
         return out
 
+class convnext(torch.nn.Module):
+    def __init__(self, requires_grad=False, pretrained=True, model='tiny'):
+        super(convnext, self).__init__()
+        if(model=='tiny'):
+            convnext_features = tv.convnext_tiny(weights=tv.ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None).features
+        elif(model=='small'):
+            convnext_features = tv.convnext_small(weights=tv.ConvNeXt_Small_Weights.IMAGENET1K_V1 if pretrained else None).features
+        elif(model=='base'):
+            convnext_features = tv.convnext_base(weights=tv.ConvNeXt_Base_Weights.IMAGENET1K_V1 if pretrained else None).features
+        elif(model=='large'):
+            convnext_features = tv.convnext_large(weights=tv.ConvNeXt_Large_Weights.IMAGENET1K_V1 if pretrained else None).features
+
+        self.slice1 = torch.nn.Sequential()
+        self.slice2 = torch.nn.Sequential()
+        self.slice3 = torch.nn.Sequential()
+        self.slice4 = torch.nn.Sequential()
+        self.N_slices = 4
+
+        for x in range(2):
+            self.slice1.add_module(str(x), convnext_features[x])
+        for x in range(2, 4):
+            self.slice2.add_module(str(x), convnext_features[x])
+        for x in range(4, 6):
+            self.slice3.add_module(str(x), convnext_features[x])
+        for x in range(6, 8):
+            self.slice4.add_module(str(x), convnext_features[x])
+
+    def forward(self, X):
+        h = self.slice1(X)
+        h_relu1 = h
+        h = self.slice2(h)
+        h_relu2 = h
+        h = self.slice3(h)
+        h_relu3 = h
+        h = self.slice4(h)
+        h_relu4 = h
+
+        convnext_outputs = namedtuple("ConvnextOutputs", ['relu1', 'relu2', 'relu3', 'relu4'])
+        out = convnext_outputs(h_relu1, h_relu2, h_relu3, h_relu4)
+
+        return out

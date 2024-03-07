@@ -72,7 +72,7 @@ class LPIPS(nn.Module):
         self.version = version
         self.scaling_layer = ScalingLayer()
         model=None
-        lin_layer = NetLinLayer
+
         if(self.pnet_type in ['vgg','vgg16']):
             net_type = pn.vgg16
             self.chns = [64,128,256,512,512]
@@ -96,6 +96,22 @@ class LPIPS(nn.Module):
         elif(self.pnet_type=='dinov2'):
             net_type = pn.dinov2
             self.chns = [384 for _ in range(12)]
+        elif(self.pnet_type=='convnext-tiny'):
+            net_type = pn.convnext
+            self.chns = [96,192,384,768]
+            model = 'tiny'
+        elif(self.pnet_type=='convnext-small'):
+            net_type = pn.convnext
+            self.chns = [96,192,384,768]
+            model = 'small'
+        elif(self.pnet_type=='convnext-base'):
+            net_type = pn.convnext
+            self.chns = [128,256,512,1024]
+            model = 'base'
+        elif(self.pnet_type=='convnext-large'):
+            net_type = pn.convnext
+            self.chns = [192,384,768,1536]
+            model = 'large'
         self.L = len(self.chns)
 
         self.net = net_type(pretrained=not self.pnet_rand, requires_grad=self.pnet_tune, model=model)
@@ -103,7 +119,7 @@ class LPIPS(nn.Module):
         if(lpips):
             self.lins = []
             for chn in self.chns:
-                self.lins += [lin_layer(chn, use_dropout=use_dropout)]
+                self.lins += [NetLinLayer(chn, use_dropout=use_dropout)]
 
             self.lins = nn.ModuleList(self.lins)
             if(pretrained):
@@ -176,21 +192,9 @@ class NetLinLayer(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-class NetLinLayer1d(nn.Module):
-    ''' A single linear layer which does a 1x1 conv '''
-    def __init__(self, chn_in, chn_out=1, use_dropout=False):
-        super(NetLinLayer1d, self).__init__()
-
-        layers = [nn.Dropout(),] if(use_dropout) else []
-        layers += [nn.Conv1d(chn_in, chn_out, 1, stride=1, padding=0, bias=False),]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.model(x)
-
 class Dist2LogitLayer(nn.Module):
     ''' takes 2 distances, puts through fc layers, spits out value between [0,1] (if use_sigmoid is True) '''
-    def __init__(self, chn_mid=32, use_sigmoid=True):
+    def __init__(self, chn_mid=32):
         super(Dist2LogitLayer, self).__init__()
 
         layers = [nn.Conv2d(5, chn_mid, 1, stride=1, padding=0, bias=True),]
@@ -198,8 +202,6 @@ class Dist2LogitLayer(nn.Module):
         layers += [nn.Conv2d(chn_mid, chn_mid, 1, stride=1, padding=0, bias=True),]
         layers += [nn.LeakyReLU(0.2,True),]
         layers += [nn.Conv2d(chn_mid, 1, 1, stride=1, padding=0, bias=True),]
-        # if(use_sigmoid):
-        #     layers += [nn.Sigmoid(),]
         self.model = nn.Sequential(*layers)
 
     def forward(self,d0,d1,eps=0.1):
@@ -209,41 +211,9 @@ class BCERankingLoss(nn.Module):
     def __init__(self, chn_mid=32):
         super(BCERankingLoss, self).__init__()
         self.net = Dist2LogitLayer(chn_mid=chn_mid)
-        # self.parameters = list(self.net.parameters())
-        # self.loss = torch.nn.BCELoss()
         self.loss = torch.nn.BCEWithLogitsLoss()
 
     def forward(self, d0, d1, judge) -> torch.Tensor:
-        per = (judge+1.)/2.
-        self.logit = self.net.forward(d0,d1)
-        return self.loss(self.logit, per)
-
-class Dist2LogitLayer1d(nn.Module):
-    ''' takes 2 distances, puts through fc layers, spits out value between [0,1] (if use_sigmoid is True) '''
-    def __init__(self, chn_mid=32, use_sigmoid=True):
-        super(Dist2LogitLayer1d, self).__init__()
-
-        layers = [nn.Conv1d(5, chn_mid, 1, stride=1, padding=0, bias=True),]
-        layers += [nn.LeakyReLU(0.2,True),]
-        layers += [nn.Conv1d(chn_mid, chn_mid, 1, stride=1, padding=0, bias=True),]
-        layers += [nn.LeakyReLU(0.2,True),]
-        layers += [nn.Conv1d(chn_mid, 1, 1, stride=1, padding=0, bias=True),]
-        # if(use_sigmoid):
-        #     layers += [nn.Sigmoid(),]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self,d0,d1,eps=0.1):
-        return self.model.forward(torch.cat((d0,d1,d0-d1,d0/(d1+eps),d1/(d0+eps)),dim=1))
-
-class BCERankingLoss1d(nn.Module):
-    def __init__(self, chn_mid=32):
-        super(BCERankingLoss1d, self).__init__()
-        self.net = Dist2LogitLayer1d(chn_mid=chn_mid)
-        # self.parameters = list(self.net.parameters())
-        # self.loss = torch.nn.BCELoss()
-        self.loss = torch.nn.BCEWithLogitsLoss()
-
-    def forward(self, d0, d1, judge):
         per = (judge+1.)/2.
         self.logit = self.net.forward(d0,d1)
         return self.loss(self.logit, per)

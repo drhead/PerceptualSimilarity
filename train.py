@@ -1,25 +1,31 @@
-import torch.backends.cudnn as cudnn
-cudnn.benchmark=True
-
 import numpy as np
 import time
 import os
 import torch
+import torch.backends.cudnn as cudnn
+import torch._dynamo.config
+cudnn.benchmark=False
+torch.use_deterministic_algorithms(True)
+# torch._dynamo.config.verify_correctness = True
+# torch._dynamo.config.repro_tolerance = 1e4
 import lpips
 from data import data_loader as dl
 import argparse
 from IPython import embed
 from tqdm import tqdm
 import wandb
+import random
 torch.manual_seed(42)
-use_wandb = True
+np.random.seed(42)
+random.seed(42)
+use_wandb = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_mode', type=str, default='2afc', help='[2afc,jnd]')
 parser.add_argument('--datasets', type=str, nargs='+', default=['train/traditional','train/cnn','train/mix'], help='datasets to train on: [train/traditional],[train/cnn],[train/mix],[val/traditional],[val/cnn],[val/color],[val/deblur],[val/frameinterp],[val/superres]')
 parser.add_argument('--model', type=str, default='lpips', help='distance model type [lpips] for linearly calibrated net, [baseline] for off-the-shelf network, [l2] for euclidean distance, [ssim] for Structured Similarity Image Metric')
 parser.add_argument('--net', type=str, default='alex', help='[squeeze], [alex], or [vgg] for network architectures')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size to test image patches in')
+parser.add_argument('--batch_size', type=int, default=32, help='batch size to test image patches in')
 
 parser.add_argument('--nThreads', type=int, default=12, help='number of threads to use in data loader')
 parser.add_argument('--nepoch', type=int, default=5, help='# epochs at base learning rate')
@@ -32,10 +38,10 @@ parser.add_argument('--name', type=str, default='tmp', help='directory name for 
 parser.add_argument('--from_scratch', action='store_true', help='model was initialized from scratch')
 parser.add_argument('--train_trunk', action='store_true', help='model trunk was trained/tuned')
 parser.add_argument('--train_plot', action='store_true', help='plot saving')
-parser.add_argument('--optimizer', type=str, default='adam')
-parser.add_argument('--lr_schedule', type=str, default='none')
-parser.add_argument('--no_decay_bias', type=bool, default=False)
-parser.add_argument('--color_space', type=str, default='sRGB')
+parser.add_argument('--optimizer', type=str, default='adamw')
+parser.add_argument('--lr_schedule', type=str, default='cosine')
+parser.add_argument('--no_decay_bias', type=bool, default=True)
+parser.add_argument('--color_space', type=str, default='srgb')
 
 lr = 1e-4
 
@@ -58,7 +64,7 @@ if use_wandb:
     wandb.init(
         # set the wandb project where this run will be logged
         project="lpips",
-        name=f"{opt.net}-{opt.optimizer}-baseline",
+        name=f"{opt.net}-{opt.optimizer}-oklab-shifted",
         config=config)
 
 img_size = 56 if opt.net=='efficientnetv2' else 64
@@ -71,7 +77,8 @@ data_loader = dl.CreateDataLoader(
     load_size=img_size,
     serial_batches=False,
     nThreads=opt.nThreads,
-    use_cache=True)
+    use_cache=True,
+    colorspace=opt.color_space)
 dataset = data_loader.load_data()
 dataset_size = len(data_loader)
 D = len(dataset)
@@ -116,17 +123,19 @@ for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
     with tqdm(
             desc=f"Training (Epoch {epoch})...",
             total=dataset_size//opt.batch_size,
-            dynamic_ncols=True) as pbar:
+            dynamic_ncols=True,
+            mininterval=1.0) as pbar:
         for i, data in enumerate(dataset):
             iter_start_time = time.time()
             total_steps += opt.batch_size
             epoch_iter = total_steps - dataset_size * (epoch - 1)
 
             ref, p0, p1, judge = trainer.set_input(data)
-            errors = {}
             loss, acc_r = trainer.optimize_parameters(ref, p0, p1, judge)
+
             loss = loss.detach().cpu().numpy()
             acc_r = np.mean(acc_r.detach().cpu().numpy())
+
             pbar.update(1)
             if ema_loss is None:
                 ema_loss = loss
@@ -170,7 +179,7 @@ for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
     val_distortions = 0.0
     val_algorithms = 0.0
     for val_dataset in ['val/traditional','val/cnn','val/superres','val/deblur','val/color','val/frameinterp']:
-        val_data_loader = dl.CreateDataLoader(val_dataset,dataset_mode=opt.dataset_mode, load_size=img_size, batch_size=50, nThreads=opt.nThreads)
+        val_data_loader = dl.CreateDataLoader(val_dataset,dataset_mode=opt.dataset_mode, load_size=img_size, batch_size=50, nThreads=opt.nThreads, colorspace=opt.color_space)
         with torch.no_grad():
             # evaluate model on data
             if(opt.dataset_mode=='2afc'):

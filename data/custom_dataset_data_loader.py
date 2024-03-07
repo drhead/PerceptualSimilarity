@@ -2,7 +2,7 @@ import torch.utils.data
 from data.base_data_loader import BaseDataLoader
 import os
 
-def CreateDataset(dataroots,dataset_mode='2afc',load_size=64, use_cache=False):
+def CreateDataset(dataroots,dataset_mode='2afc',load_size=64, use_cache=False, colorspace='srgb'):
     dataset = None
     if dataset_mode=='2afc': # human judgements
         from data.dataset.twoafc_dataset import TwoAFCDataset
@@ -13,7 +13,7 @@ def CreateDataset(dataroots,dataset_mode='2afc',load_size=64, use_cache=False):
     else:
         raise ValueError("Dataset Mode [%s] not recognized."%self.dataset_mode)
 
-    dataset.initialize(dataroots,load_size=load_size, use_cache=use_cache)
+    dataset.initialize(dataroots,load_size=load_size, use_cache=use_cache, colorspace=colorspace)
     return dataset
 
 class CustomDatasetDataLoader(BaseDataLoader):
@@ -29,7 +29,8 @@ class CustomDatasetDataLoader(BaseDataLoader):
             batch_size=1,
             serial_batches=True,
             nThreads=1,
-            use_cache=False):
+            use_cache=False,
+            colorspace='srgb'):
         BaseDataLoader.initialize(self)
         if(not isinstance(datafolders,list)):
             datafolders = [datafolders,]
@@ -38,7 +39,8 @@ class CustomDatasetDataLoader(BaseDataLoader):
             data_root_folders,
             dataset_mode=dataset_mode,
             load_size=load_size,
-            use_cache=use_cache)
+            use_cache=use_cache,
+            colorspace=colorspace)
         g_cpu = torch.Generator()
         g_cpu.manual_seed(100)
         self.dataloader = torch.utils.data.DataLoader(

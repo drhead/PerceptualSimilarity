@@ -114,8 +114,7 @@ class Trainer():
             if self.schedule == 'cosine':
                 self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=T_max, eta_min=0)
             elif self.schedule == 'linear':
-                lr_lambda = lambda step: max(1e-6, 1.0 - step / T_max)
-                self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer_net, lr_lambda=lr_lambda)
+                self.lr_scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer_net, start_factor=1.0, end_factor=0.0, total_iters=T_max)
 
         if(printNet):
             print('---------- Networks initialized -------------')
@@ -132,26 +131,19 @@ class Trainer():
 
         return self.net.forward(in0, in1, retPerLayer=retPerLayer)
 
-    # def inspect_grad_fn(self, grad_fn, depth):
-    #     if callable(grad_fn):
-    #         print(f"depth {depth}: {grad_fn} -> {grad_fn.next_functions}") 
-    #         for item in grad_fn.next_functions:
-    #             self.inspect_grad_fn(item, depth+1)
-    #     elif isinstance(grad_fn, tuple):
-    #         for item in grad_fn:
-    #             self.inspect_grad_fn(item, depth+1)
-
     # ***** TRAINING FUNCTIONS *****
-    @partial(torch.compile,
-        backend="inductor",
-        options={
-            "triton.cudagraphs": True,
-            "max_autotune": True,
-            "max_autotune_pointwise": True,
-            "max_autotune_gemm": True,
-            "max_autotune_gemm_backends": "ATEN,TRITON",
-        })
+    # @partial(torch.compile,
+    #     backend="inductor",
+    #     options={
+    #         "triton.cudagraphs": True,
+    #         "max_autotune": True,
+    #         "max_autotune_pointwise": True,
+    #         "max_autotune_gemm": True,
+    #         "max_autotune_gemm_backends": "ATEN,TRITON"
+    #         }
+    #     )
     def compiled_training(self, ref, p0, p1, judge):
+        # with torch.autograd.set_detect_anomaly(True):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             d0 = self.net.forward(ref, p0)
             d1 = self.net.forward(ref, p1)
