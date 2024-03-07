@@ -132,16 +132,16 @@ class Trainer():
         return self.net.forward(in0, in1, retPerLayer=retPerLayer)
 
     # ***** TRAINING FUNCTIONS *****
-    # @partial(torch.compile,
-    #     backend="inductor",
-    #     options={
-    #         "triton.cudagraphs": True,
-    #         "max_autotune": True,
-    #         "max_autotune_pointwise": True,
-    #         "max_autotune_gemm": True,
-    #         "max_autotune_gemm_backends": "ATEN,TRITON"
-    #         }
-    #     )
+    @partial(torch.compile,
+        backend="inductor",
+        options={
+            "triton.cudagraphs": True,
+            "max_autotune": True,
+            "max_autotune_pointwise": True,
+            "max_autotune_gemm": True,
+            "max_autotune_gemm_backends": "ATEN,TRITON"
+            }
+        )
     def compiled_training(self, ref, p0, p1, judge):
         # with torch.autograd.set_detect_anomaly(True):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):

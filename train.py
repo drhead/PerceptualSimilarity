@@ -6,6 +6,7 @@ import torch.backends.cudnn as cudnn
 import torch._dynamo.config
 cudnn.benchmark=False
 torch.use_deterministic_algorithms(True)
+torch.set_float32_matmul_precision('high')
 # torch._dynamo.config.verify_correctness = True
 # torch._dynamo.config.repro_tolerance = 1e4
 import lpips
@@ -25,7 +26,7 @@ parser.add_argument('--dataset_mode', type=str, default='2afc', help='[2afc,jnd]
 parser.add_argument('--datasets', type=str, nargs='+', default=['train/traditional','train/cnn','train/mix'], help='datasets to train on: [train/traditional],[train/cnn],[train/mix],[val/traditional],[val/cnn],[val/color],[val/deblur],[val/frameinterp],[val/superres]')
 parser.add_argument('--model', type=str, default='lpips', help='distance model type [lpips] for linearly calibrated net, [baseline] for off-the-shelf network, [l2] for euclidean distance, [ssim] for Structured Similarity Image Metric')
 parser.add_argument('--net', type=str, default='alex', help='[squeeze], [alex], or [vgg] for network architectures')
-parser.add_argument('--batch_size', type=int, default=32, help='batch size to test image patches in')
+parser.add_argument('--batch_size', type=int, default=64, help='batch size to test image patches in')
 
 parser.add_argument('--nThreads', type=int, default=12, help='number of threads to use in data loader')
 parser.add_argument('--nepoch', type=int, default=5, help='# epochs at base learning rate')
@@ -64,7 +65,7 @@ if use_wandb:
     wandb.init(
         # set the wandb project where this run will be logged
         project="lpips",
-        name=f"{opt.net}-{opt.optimizer}-oklab-shifted",
+        name=f"{opt.net}-{opt.optimizer}-srgb",
         config=config)
 
 img_size = 56 if opt.net=='efficientnetv2' else 64
