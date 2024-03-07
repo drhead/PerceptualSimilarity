@@ -3,14 +3,11 @@ from __future__ import absolute_import
 
 import numpy as np
 import torch
-from torch import nn
 from collections import OrderedDict
-from torch.autograd import Variable
 from scipy.ndimage import zoom
 from tqdm import tqdm
 import lpips
 import os
-import bitsandbytes as bnb
 from adan import Adan
 from functools import partial
 
@@ -178,8 +175,6 @@ class Trainer():
         ''' d0, d1 are Variables, judge is a Tensor '''
         d1_lt_d0 = (d1<d0).data.flatten()
         judge_per = judge.flatten()
-        # print(d1_lt_d0)
-        # print(judge_per)
         return d1_lt_d0*judge_per + (~d1_lt_d0)*(1-judge_per)
 
     def get_visuals(self, ref: torch.Tensor, p0: torch.Tensor, p1: torch.Tensor):
