@@ -1,5 +1,6 @@
 
 from __future__ import absolute_import
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -9,14 +10,13 @@ from tqdm import tqdm
 import lpips
 import os
 from adan import Adan
-from functools import partial
 
 class Trainer():
     def name(self):
         return self.model_name
 
     def initialize(self, model='lpips', net='alex', colorspace='Lab', pnet_rand=False, pnet_tune=False, model_path=None,
-            device='cuda', printNet=False, spatial=False, 
+            device='cuda', spatial=False, 
             is_train=False, lr=.0001, beta1=0.5, version='0.1', T_max=23600, optimizer='adam', schedule='none', no_decay_bias=False):
         '''
         INPUTS
@@ -73,10 +73,10 @@ class Trainer():
         else: # test mode
             self.net.eval()
 
-        self.net = self.net.to(self.device, memory_format=torch.channels_last)
+        self.net = self.net.cuda()
 
         if self.is_train:
-            self.rankLoss = self.rankLoss.to(device=self.device, memory_format=torch.channels_last) # just put this on GPU0
+            self.rankLoss = self.rankLoss.cuda()
             if no_decay_bias:
                 decay = []
                 no_decay = []
@@ -104,7 +104,7 @@ class Trainer():
             if optimizer == 'adam':
                 self.optimizer_net = torch.optim.Adam(optim_params, lr=lr, betas=(beta1, 0.999))
             elif optimizer == 'adamw':
-                self.optimizer_net = torch.optim.AdamW(optim_params, lr=lr, betas=(beta1, 0.999))
+                self.optimizer_net = torch.optim.AdamW(optim_params, lr=torch.tensor(lr), betas=(beta1, 0.999))
             elif optimizer == 'adan':
                 self.optimizer_net = Adan(optim_params, lr=lr)
 
@@ -113,25 +113,8 @@ class Trainer():
             elif self.schedule == 'linear':
                 self.lr_scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer_net, start_factor=1.0, end_factor=0.0, total_iters=T_max)
 
-        if(printNet):
-            print('---------- Networks initialized -------------')
-            networks.print_network(self.net)
-            print('-----------------------------------------------')
-
-    def forward(self, in0, in1, retPerLayer=False):
-        ''' Function computes the distance between image patches in0 and in1
-        INPUTS
-            in0, in1 - torch.Tensor object of shape Nx3xXxY - image patch scaled to [-1,1]
-        OUTPUT
-            computed distances between in0 and in1
-        '''
-
-        return self.net.forward(in0, in1, retPerLayer=retPerLayer)
-
     # ***** TRAINING FUNCTIONS *****
-    @partial(torch.compile,
-        backend="inductor",
-        options={
+    @torch.compile(options={
             "triton.cudagraphs": True,
             "max_autotune": True,
             "max_autotune_pointwise": True,
@@ -139,37 +122,34 @@ class Trainer():
             "max_autotune_gemm_backends": "ATEN,TRITON"
             }
         )
-    def compiled_training(self, ref, p0, p1, judge):
-        # with torch.autograd.set_detect_anomaly(True):
+    def compiled_training(self, data: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.optimizer_net.zero_grad()
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            d0 = self.net.forward(ref, p0)
-            d1 = self.net.forward(ref, p1)
-            loss = self.rankLoss.forward(d0, d1, judge*2.-1.)
-            acc_r = self.compute_accuracy(d0, d1, judge)
+            d0 = self.net.forward(data['ref'], data['p0'])
+            d1 = self.net.forward(data['ref'], data['p1'])
+            loss = self.rankLoss.forward(d0, d1, data['judge']*2.-1.)
+            with torch.no_grad():
+                acc_r = self.compute_accuracy(d0, d1, data['judge'])
         loss.backward()
-        return loss, acc_r
+        return loss.detach(), acc_r.mean()
 
-    def optimize_parameters(self, ref, p0, p1, judge):
-        loss, acc_r = self.compiled_training(ref, p0, p1, judge)
+    @torch.compile(fullgraph=False)
+    def compiled_optimizer(self):
         self.optimizer_net.step()
+        self.clamp_weights()
+
+    def optimize_parameters(self, data: dict) -> Tuple[np.ndarray, np.ndarray]:
+        loss, acc_r = self.compiled_training(data)
+        self.compiled_optimizer()
         if self.schedule != 'none':
             self.lr_scheduler.step()
-        self.optimizer_net.zero_grad()
-        self.clamp_weights()
-        return loss, acc_r
+
+        return loss.cpu().numpy(), acc_r.cpu().numpy()
 
     def clamp_weights(self):
         for module in self.net.lins.modules():
             if(hasattr(module, 'weight') and hasattr(module, 'kernel_size') and module.kernel_size==(1,1)):
                 module.weight.data.clamp_(min=0)
-
-    def set_input(self, data):
-        ref = data['ref'].to(device=self.device, memory_format=torch.channels_last)
-        p0 = data['p0'].to(device=self.device, memory_format=torch.channels_last)
-        p1 = data['p1'].to(device=self.device, memory_format=torch.channels_last)
-        judge = data['judge'].to(device=self.device, memory_format=torch.channels_last)
-
-        return ref, p0, p1, judge
 
     def compute_accuracy(self, d0: torch.Tensor, d1: torch.Tensor, judge: torch.Tensor) -> torch.Tensor:
         ''' d0, d1 are Variables, judge is a Tensor '''

@@ -1,0 +1,21 @@
+name: lpips
+channels:
+  - defaults
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch>=2.0.0
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - scipy
+  - scikit-image
+  - timm
+  - colour-science
+  - jupyter
+  - matplotlib
+  - pip
+  pip:
+    - adan@git+https://github.com/sail-sg/Adan.git@689968c

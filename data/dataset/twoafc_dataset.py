@@ -40,15 +40,11 @@ class TwoAFCDataset(BaseDataset):
             self.cache_shape_judge = (len(self.p0_paths), 1, 1, 1)
             self.cache_nbytes_judge = np.ndarray(self.cache_shape_judge, np.float32).nbytes
 
-            try:
-                print("Unlinking caches")
-                SharedMemory("ref_cache").unlink()
-                SharedMemory("p0_cache").unlink()
-                SharedMemory("p1_cache").unlink()
-                SharedMemory("judge_cache").unlink()
-                SharedMemory("index_cache").unlink()
-            except:
-                pass
+            for cache in ['ref', 'p0', 'p1', 'judge', 'index']:
+                try:
+                    SharedMemory(f"{cache}_cache").unlink()
+                except:
+                    pass
 
             # # Register the cleanup function to be called on termination signals
             # signal.signal(signal.SIGTERM, lambda signum, frame: self.cleanup_shared_memory())

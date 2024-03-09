@@ -4,8 +4,8 @@ import os
 import torch
 import torch.backends.cudnn as cudnn
 import torch._dynamo.config
-cudnn.benchmark=False
-torch.use_deterministic_algorithms(True)
+cudnn.benchmark=True
+# torch.use_deterministic_algorithms(True)
 torch.set_float32_matmul_precision('high')
 # torch._dynamo.config.verify_correctness = True
 # torch._dynamo.config.repro_tolerance = 1e4
@@ -19,19 +19,18 @@ import random
 torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
-use_wandb = False
+use_wandb = True
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_mode', type=str, default='2afc', help='[2afc,jnd]')
 parser.add_argument('--datasets', type=str, nargs='+', default=['train/traditional','train/cnn','train/mix'], help='datasets to train on: [train/traditional],[train/cnn],[train/mix],[val/traditional],[val/cnn],[val/color],[val/deblur],[val/frameinterp],[val/superres]')
 parser.add_argument('--model', type=str, default='lpips', help='distance model type [lpips] for linearly calibrated net, [baseline] for off-the-shelf network, [l2] for euclidean distance, [ssim] for Structured Similarity Image Metric')
 parser.add_argument('--net', type=str, default='alex', help='[squeeze], [alex], or [vgg] for network architectures')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size to test image patches in')
+parser.add_argument('--batch_size', type=int, default=128, help='batch size to test image patches in')
 
 parser.add_argument('--nThreads', type=int, default=12, help='number of threads to use in data loader')
 parser.add_argument('--nepoch', type=int, default=5, help='# epochs at base learning rate')
 parser.add_argument('--nepoch_decay', type=int, default=5, help='# additional epochs at linearly learning rate')
-parser.add_argument('--save_latest_freq', type=int, default=25600, help='frequency (in instances) of saving the latest results')
 parser.add_argument('--save_epoch_freq', type=int, default=1, help='frequency of saving checkpoints at the end of epochs')
 parser.add_argument('--checkpoints_dir', type=str, default='checkpoints', help='checkpoints directory')
 parser.add_argument('--name', type=str, default='tmp', help='directory name for training')
@@ -65,7 +64,7 @@ if use_wandb:
     wandb.init(
         # set the wandb project where this run will be logged
         project="lpips",
-        name=f"{opt.net}-{opt.optimizer}-srgb",
+        name=f"{opt.net}-{opt.optimizer}-batch-ablation-128",
         config=config)
 
 img_size = 56 if opt.net=='efficientnetv2' else 64
@@ -78,7 +77,7 @@ data_loader = dl.CreateDataLoader(
     load_size=img_size,
     serial_batches=False,
     nThreads=opt.nThreads,
-    use_cache=False,
+    use_cache=True,
     colorspace=opt.color_space)
 dataset = data_loader.load_data()
 dataset_size = len(data_loader)
@@ -101,9 +100,8 @@ trainer.initialize(
     no_decay_bias=opt.no_decay_bias)
 
 val_forward = torch.compile(
-    trainer.forward,
+    trainer.net.forward,
     fullgraph=True,
-    backend="inductor",
     options={
         "triton.cudagraphs": True,
         "max_autotune": True,
@@ -119,23 +117,35 @@ ema_loss = None
 ema_accuracy = None
 alpha = 0.95
 
+# prof = torch.profiler.profile(
+#     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+#     schedule=torch.profiler.schedule(wait=250, warmup=50, active=50, repeat=1),
+#     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/plugins/profile'),
+#     record_shapes=True,
+#     profile_memory=True,
+#     with_stack=True,
+#     with_flops=True,
+#     with_modules=True,
+# )
+
 for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
     epoch_start_time = time.time()
+    # if epoch == 2: prof.start()
     with tqdm(
             desc=f"Training (Epoch {epoch})...",
             total=dataset_size//opt.batch_size,
             dynamic_ncols=True,
             mininterval=1.0) as pbar:
         for i, data in enumerate(dataset):
+            # if epoch == 2: prof.step()
+
             iter_start_time = time.time()
             total_steps += opt.batch_size
             epoch_iter = total_steps - dataset_size * (epoch - 1)
+            for key in list(data.keys())[:4]:
+                data[key] = data[key].cuda()
 
-            ref, p0, p1, judge = trainer.set_input(data)
-            loss, acc_r = trainer.optimize_parameters(ref, p0, p1, judge)
-
-            loss = loss.detach().cpu().numpy()
-            acc_r = np.mean(acc_r.detach().cpu().numpy())
+            loss, acc_r = trainer.optimize_parameters(data)
 
             pbar.update(1)
             if ema_loss is None:
@@ -158,12 +168,7 @@ for epoch in range(1, opt.nepoch + opt.nepoch_decay + 1):
             # if total_steps % opt.display_freq == 0 and use_wandb:
             #     wandb.log(trainer.get_visuals(ref, p0, p1), commit=False)
 
-            if total_steps % opt.save_latest_freq == 0:
-                # print('saving the latest model (epoch %d, total_steps %d)' %
-                #       (epoch, total_steps))
-                trainer.save(opt.save_dir, 'latest')
-            if use_wandb:
-                wandb.log(data={}, step=total_steps)
+    # if epoch == 2: prof.stop()
 
     if epoch % opt.save_epoch_freq == 0:
         print('saving the model at the end of epoch %d, iters %d' %
