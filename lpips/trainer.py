@@ -106,7 +106,7 @@ class Trainer():
             elif optimizer == 'adamw':
                 self.optimizer_net = torch.optim.AdamW(optim_params, lr=torch.tensor(lr), betas=(beta1, 0.999))
             elif optimizer == 'adan':
-                self.optimizer_net = Adan(optim_params, lr=lr)
+                self.optimizer_net = Adan(optim_params, lr=torch.tensor(lr))
 
             if self.schedule == 'cosine':
                 self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer_net, T_max=T_max, eta_min=0)
@@ -123,7 +123,6 @@ class Trainer():
             }
         )
     def compiled_training(self, data: dict) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.optimizer_net.zero_grad()
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             d0 = self.net.forward(data['ref'], data['p0'])
             d1 = self.net.forward(data['ref'], data['p1'])
@@ -136,6 +135,7 @@ class Trainer():
     @torch.compile(fullgraph=False)
     def compiled_optimizer(self):
         self.optimizer_net.step()
+        self.optimizer_net.zero_grad()
         self.clamp_weights()
 
     def optimize_parameters(self, data: dict) -> Tuple[np.ndarray, np.ndarray]:
@@ -144,7 +144,7 @@ class Trainer():
         if self.schedule != 'none':
             self.lr_scheduler.step()
 
-        return loss.cpu().numpy(), acc_r.cpu().numpy()
+        return loss, acc_r
 
     def clamp_weights(self):
         for module in self.net.lins.modules():

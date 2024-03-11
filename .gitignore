@@ -4,3 +4,5 @@ checkpoints/*
 torch_compile_debug/*
 wandb/*
 collect_env.py
+log/*
+isolate/*

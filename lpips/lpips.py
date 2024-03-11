@@ -71,13 +71,6 @@ class LPIPS(nn.Module):
         self.scaling_layer = ScalingLayer()
 
         self.net = timm.create_model(self.pnet_type, pretrained=not self.pnet_rand, features_only=True)
-        # self.net = torch.compile(self.net,         options={
-        #     "triton.cudagraphs": True,
-        #     "max_autotune": True,
-        #     "max_autotune_pointwise": True,
-        #     "max_autotune_gemm": True,
-        #     "max_autotune_gemm_backends": "ATEN,TRITON"
-        #     })
         self.chns = self.net.feature_info.channels()
         self.L = len(self.chns)
 
